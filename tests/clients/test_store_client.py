@@ -16,8 +16,6 @@ from app.clients.store import (
 )
 from tests.factories import BASE_URL, me, order
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture
 def store():
