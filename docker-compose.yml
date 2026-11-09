@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: orderpilot
       POSTGRES_DB: orderpilot
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
