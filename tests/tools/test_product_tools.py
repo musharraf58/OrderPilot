@@ -1,7 +1,7 @@
 from uuid import uuid4
 
+from tests.conftest import TOKEN
 from tests.factories import product
-from tests.tools.conftest import TOKEN
 
 
 async def test_search_products_success_is_compact(store, registry, ctx):

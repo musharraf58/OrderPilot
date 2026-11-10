@@ -23,6 +23,7 @@ ErrorCode = Literal[
     "unauthorized",
     "conflict",
     "not_cancellable",
+    "not_allowed",
     "store_unavailable",
     "store_error",
     "invalid_arguments",

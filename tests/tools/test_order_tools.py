@@ -2,8 +2,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.conftest import TOKEN
 from tests.factories import order
-from tests.tools.conftest import TOKEN
 
 FOREIGN_ORDER_ID = str(uuid4())
 
