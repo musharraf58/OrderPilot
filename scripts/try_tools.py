@@ -12,25 +12,14 @@ environment or the local .env file. Credentials are never printed.
 import argparse
 import asyncio
 import json
-import os
 import sys
-from pathlib import Path
 from uuid import uuid4
 
-from dotenv import dotenv_values
+from _env import load_env, store_token
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from app.clients.store import StoreClient, StoreError  # noqa: E402
-from app.tools.context import UserContext  # noqa: E402
-from app.tools.registry import ToolRegistry, build_default_registry  # noqa: E402
-
-
-def load_env() -> dict[str, str]:
-    values = {k: v for k, v in dotenv_values(ROOT / ".env").items() if v}
-    values.update({k: v for k, v in os.environ.items() if k.startswith("STORE_")})
-    return values
+from app.clients.store import StoreClient, StoreError
+from app.tools.context import UserContext
+from app.tools.registry import ToolRegistry, build_default_registry
 
 
 async def call(registry: ToolRegistry, ctx: UserContext, name: str, args: dict) -> dict | None:
@@ -50,12 +39,10 @@ async def main(cancel_id: str | None) -> int:
     print(f"Store: {base_url}  (first call may be slow if the server is asleep)")
     async with StoreClient(base_url) as client:
         try:
-            token = env.get("STORE_TOKEN")
+            token = await store_token(client, env)
             if not token:
-                if not (env.get("STORE_EMAIL") and env.get("STORE_PASSWORD")):
-                    print("Set STORE_TOKEN, or STORE_EMAIL and STORE_PASSWORD.")
-                    return 2
-                token = (await client.login(env["STORE_EMAIL"], env["STORE_PASSWORD"])).access_token
+                print("Set STORE_TOKEN, or STORE_EMAIL and STORE_PASSWORD.")
+                return 2
             ctx = await UserContext.from_token(client, token)
         except StoreError as exc:
             print(f"Could not authenticate: {exc.message}")
