@@ -110,7 +110,7 @@ class StoreClient:
         base_url: str,
         *,
         first_call_timeout: float = 30.0,
-        timeout: float = 10.0,
+        timeout: float = 15.0,
         max_attempts: int = 3,
         backoff: float = 0.5,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
