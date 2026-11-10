@@ -59,11 +59,55 @@ Try the tools against a real store with `uv run python scripts/try_tools.py` (ne
 `STORE_API_URL` and either `STORE_TOKEN` or `STORE_EMAIL`/`STORE_PASSWORD`; see
 `.env.example`). It is not run by pytest or CI.
 
+## Agent loop
+
+A small hand-written loop (`app/agent/loop.py`, no agent framework) sits on top of the
+tool registry. Each customer turn works like this:
+
+```
+ customer message + history
+            │
+            ▼
+   ┌──────────────────┐   text    ┌──────────────────┐
+   │   call the LLM   │──────────▶│  final answer    │──▶ AgentResult
+   │ (prompt, history,│           └──────────────────┘    (final_text, trace,
+   │  offered tools)  │                                     usage, history)
+   └──────────────────┘
+       │ tool calls ▲
+       ▼            │ ToolResults appended to history
+   ┌──────────────────────────────┐
+   │ for each call, in order:     │
+   │  write tool & writes off? ───┼──▶ refused (not_allowed)
+   │  else registry.execute(      │
+   │    name, model args, ctx)    │◀── ctx comes from our code, never the model
+   └──────────────────────────────┘
+   stops after max_steps (6) or the overall timeout ──▶ polite fallback, trace "truncated"
+```
+
+- **Provider-neutral.** The loop only knows our own message types (`app/agent/llm.py`).
+  `GeminiClient` (`app/agent/gemini.py`) translates to and from Gemini, retries 429/5xx
+  with backoff, and raises a typed `LLMError` if it gives up. Tests use `ScriptedLLM`,
+  which replays scripted responses, so they never call a real model.
+- **Writes are off by default.** Write tools are not offered to the model and are refused if
+  requested anyway; the system prompt (`app/agent/prompts.py`) tells the customer the
+  assistant can't cancel orders yet.
+- **Failures are answers, not crashes.** Tool errors go back to the model as results; a
+  model failure, timeout or step limit returns a fallback message.
+- **Everything is traced.** `AgentResult.trace` records each model call (latency, tokens)
+  and tool call (name, arguments, result, latency) plus the outcome
+  (`completed` / `truncated` / `error`).
+
+Chat with it in the terminal (real store + real Gemini, not run in CI):
+
+```bash
+uv run python scripts/chat.py --trace
+```
+
 ## Roadmap
 
 - [x] Phase 0: Project foundation (config, logging, health checks, Docker, CI)
 - [x] Phase 1: Tool layer (store client, typed tools, registry)
-- [ ] Phase 2: TBD
+- [x] Phase 2: Agent loop (provider-neutral LLM interface, Gemini adapter, traces)
 - [ ] Phase 3: TBD
 - [ ] Phase 4: TBD
 - [ ] Phase 5: TBD
