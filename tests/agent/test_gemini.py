@@ -93,7 +93,8 @@ def test_history_round_trip_replays_signature_and_groups_results():
             AssistantMessage(text="done"),
         ]
     )
-    assert [c.role for c in contents] == ["user", "model", "tool", "model"]
+    # Function responses use role "user": Gemini rejects role "tool" (verified live).
+    assert [c.role for c in contents] == ["user", "model", "user", "model"]
     model_parts = contents[1].parts
     assert model_parts[0].thought_signature == SIG
     assert model_parts[0].function_call.id == "g1"

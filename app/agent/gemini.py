@@ -40,8 +40,10 @@ _SIGNATURE = "gemini_thought_signature"
 def to_gemini_contents(messages: Sequence[Message]) -> list[types.Content]:
     """Translate our history into Gemini contents.
 
-    Consecutive tool results become one "tool" turn, because Gemini expects all the
-    responses to a (possibly parallel) function-call turn together.
+    Consecutive tool results become one turn, because Gemini expects all the responses to
+    a (possibly parallel) function-call turn together. That turn must use role "user":
+    verified against the live API, role "tool" is rejected with a 400 even though the SDK
+    docs show it.
     """
     calls_by_id: dict[str, ToolCall] = {}
     contents: list[types.Content] = []
@@ -75,10 +77,10 @@ def to_gemini_contents(messages: Sequence[Message]) -> list[types.Content]:
                     )
                 )
                 previous = contents[-1] if contents else None
-                if previous is not None and previous.role == "tool":
+                if previous is not None and previous.parts and previous.parts[0].function_response:
                     previous.parts.append(part)
                 else:
-                    contents.append(types.Content(role="tool", parts=[part]))
+                    contents.append(types.Content(role="user", parts=[part]))
     return contents
 
 
