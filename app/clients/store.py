@@ -142,11 +142,13 @@ class StoreClient:
         token: str | None = None,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        idempotent: bool | None = None,
     ) -> httpx.Response:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         retryable: tuple[type[Exception], ...] = _RETRY_CONNECT_ERRORS
-        if method == "GET":
-            # A read that timed out can be repeated; a write may already have been applied.
+        if idempotent if idempotent is not None else method == "GET":
+            # A request that timed out can only be repeated if repeating it is harmless;
+            # a write may already have been applied.
             retryable += (httpx.ReadTimeout,)
 
         last_error = "no response"
@@ -208,8 +210,9 @@ class StoreClient:
     # --- auth -------------------------------------------------------------
 
     async def login(self, email: str, password: str) -> Token:
+        # Logging in changes nothing, so it is safe to retry after a cold-start timeout.
         response = await self._request(
-            "POST", "/auth/login", json={"email": email, "password": password}
+            "POST", "/auth/login", json={"email": email, "password": password}, idempotent=True
         )
         return self._parse(Token, response)
 

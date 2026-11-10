@@ -104,6 +104,17 @@ async def test_write_is_not_retried_after_read_timeout(store, client):
     assert route.call_count == 1
 
 
+async def test_login_is_retried_after_read_timeout(store, client):
+    route = store.post("/auth/login").mock(
+        side_effect=[
+            httpx.ReadTimeout("cold start"),
+            httpx.Response(200, json={"access_token": "a", "refresh_token": "r"}),
+        ]
+    )
+    assert (await client.login("e@x.com", "pw")).access_token == "a"
+    assert route.call_count == 2
+
+
 async def test_get_is_retried_after_read_timeout(store, client):
     route = store.get("/orders").mock(
         side_effect=[httpx.ReadTimeout("slow"), httpx.Response(200, json=[])]
