@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+asyncpg://orderpilot:orderpilot@localhost:5432/orderpilot"
     GEMINI_API_KEY: SecretStr = SecretStr("")
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     STORE_API_URL: str = "http://localhost:8001"
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
