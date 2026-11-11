@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import httpx2
 from google import genai
 from google.genai import errors, types
 
@@ -31,6 +32,10 @@ from app.agent.llm import (
 )
 
 logger = logging.getLogger(__name__)
+
+# google-genai 3.x sends requests with its own httpx fork, httpx2, whose exceptions do not
+# inherit from httpx's. Found the hard way: a Gemini connection error escaped the retries.
+_NETWORK_ERRORS = (httpx.HTTPError, httpx2.HTTPError, TimeoutError)
 
 # Keys inside ToolCall.provider_data.
 _NATIVE_ID = "gemini_id"
@@ -197,7 +202,7 @@ class GeminiClient(LLMClient):
                 else:
                     raise LLMError(f"Gemini rejected the request ({exc.code})") from exc
                 logger.warning("gemini attempt %d failed: %s", attempt + 1, exc.code)
-            except (httpx.HTTPError, TimeoutError) as exc:
+            except _NETWORK_ERRORS as exc:
                 error = LLMUnavailable(f"Gemini unreachable: {type(exc).__name__}")
                 logger.warning("gemini attempt %d failed: %s", attempt + 1, type(exc).__name__)
         raise error
@@ -246,7 +251,7 @@ class GeminiClient(LLMClient):
                 if candidate and candidate.finish_reason:
                     finish_reason = candidate.finish_reason
                 chunk = await anext(aiter(stream), None)
-        except (errors.APIError, httpx.HTTPError, TimeoutError) as exc:
+        except (errors.APIError, *_NETWORK_ERRORS) as exc:
             raise LLMUnavailable(f"Gemini stream failed: {type(exc).__name__}") from exc
 
         yield from_gemini_response(

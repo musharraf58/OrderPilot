@@ -268,3 +268,18 @@ def test_model_calls_without_signature_stay_unsigned():
         [ToolCallMessage(calls=[ToolCall(id="c", name="t", arguments={})])]
     )
     assert contents[0].parts[0].thought_signature is None
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError("x"), "httpx2"])
+async def test_network_errors_from_either_httpx_are_retried(client, monkeypatch, exc):
+    # google-genai 3.x raises httpx2 exceptions, which are not httpx exceptions.
+    if exc == "httpx2":
+        import httpx2
+
+        exc = httpx2.ConnectError("All connection attempts failed")
+    call = AsyncMock(side_effect=[exc, fc_response(text="ok")])
+    monkeypatch.setattr(client, "_call", call)
+    assert (await client.generate("sys", [UserMessage(text="hi")], [])).text == "ok"
+    stream_call = AsyncMock(side_effect=[exc, stream_of(chunk(types.Part(text="ok")))])
+    monkeypatch.setattr(client, "_call_stream", stream_call)
+    assert (await collect(client))[-1].text == "ok"
