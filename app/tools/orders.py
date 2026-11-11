@@ -36,7 +36,12 @@ class ListMyOrdersInput(BaseModel):
     status: OrderStatus | None = Field(
         default=None, description="Only return orders with this status. Omit for all orders."
     )
-    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of orders to return.")
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of orders to return, newest first (1 = most recent order).",
+    )
 
 
 async def _find_owned_order(tool: Tool, order_id: UUID, ctx: UserContext) -> Order:
@@ -81,8 +86,9 @@ def order_details(order: Order) -> dict[str, Any]:
 class ListMyOrders(Tool):
     name = "list_my_orders"
     description = (
-        "List the current customer's orders, newest first, with id, status, total, date and "
-        "number of items. Use this when the customer asks about their orders, order history or "
+        "List the current customer's orders with id, status, total, date and number of items. "
+        "Orders are always returned newest first, so limit=1 gives the most recent order. "
+        "Use this when the customer asks about their orders, order history or "
         "'where is my order', or when you need an order id. You never need to ask for the "
         "customer's identity: it is already known. Use get_order for the items in one order."
     )
