@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.clients.store import StoreClient
+from app.core.limits import RateLimiter, RunLocks
 from app.core.ttl_cache import TTLCache
 from app.main import create_app
 from app.tools.context import UserContext
@@ -91,6 +92,8 @@ def api_app(store_client, registry, clock):
     app.state.registry = registry
     app.state.llm = None
     app.state.auth_cache = TTLCache(ttl=60, clock=clock)
+    app.state.rate_limiter = RateLimiter(limit=100, window_s=600, clock=clock)
+    app.state.run_locks = RunLocks(stale_after=90, clock=clock)
     return app
 
 

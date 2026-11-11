@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api import auth, conversations, health
 from app.clients.store import StoreClient
 from app.core.config import get_settings
+from app.core.limits import RateLimiter, RunLocks
 from app.core.logging import setup_logging
 from app.core.middleware import RequestIDMiddleware
 from app.core.ttl_cache import TTLCache
@@ -31,6 +32,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.llm = llm
     app.state.sessionmaker = get_sessionmaker()
     app.state.auth_cache = TTLCache(ttl=settings.AUTH_CACHE_TTL_S)
+    app.state.rate_limiter = RateLimiter(settings.RATE_LIMIT_MESSAGES, settings.RATE_LIMIT_WINDOW_S)
+    app.state.run_locks = RunLocks(stale_after=settings.AGENT_TIMEOUT_S + 30)
     try:
         yield
     finally:

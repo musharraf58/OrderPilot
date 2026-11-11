@@ -1,6 +1,6 @@
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -15,6 +15,7 @@ from app.agent.llm import LLMClient, Message
 from app.agent.loop import Agent, Finished, TextDelta, ToolFinished, ToolStarted
 from app.api.deps import CurrentUser, get_llm, get_registry
 from app.core.config import get_settings
+from app.core.limits import RateLimiter, RunLocks
 from app.db.models import Conversation
 from app.db.models import Message as MessageRow
 from app.db.repositories import ConversationRepository
@@ -137,6 +138,7 @@ async def stream_turn(
     conversation_id: UUID,
     text: str,
     history: list[Message],
+    release: Callable[[], None],
 ) -> AsyncIterator[str]:
     """Run the agent and translate its events to SSE; persist the turn when it ends."""
     try:
@@ -178,12 +180,15 @@ async def stream_turn(
             "error",
             {"code": "internal_error", "message": "Something went wrong. Please try again."},
         )
+    finally:
+        release()
 
 
 @router.post("/{conversation_id}/messages")
 async def send_message(
     conversation_id: UUID,
     body: SendMessage,
+    request: Request,
     user: CurrentUser,
     sessions: SessionMaker,
     llm: Annotated[LLMClient, Depends(get_llm)],
@@ -191,8 +196,8 @@ async def send_message(
 ) -> StreamingResponse:
     """Run one agent turn and stream it as Server-Sent Events.
 
-    Every check that can fail with a plain HTTP error (auth, 404) happens here, before
-    the stream starts. After that the outcome is reported as SSE events.
+    Every check that can fail with a plain HTTP error (auth, 404, 409, 429) happens here,
+    before the stream starts. After that the outcome is reported as SSE events.
     """
     settings = get_settings()
     async with sessions() as s:
@@ -202,11 +207,36 @@ async def send_message(
         rows = await repo.load_messages(user.customer_id, conversation_id)
     history = window([to_message(r) for r in rows], settings.HISTORY_WINDOW)
 
+    # From here to the return there is no await, so these checks and the lock acquisition
+    # cannot interleave with another request.
+    locks: RunLocks = request.app.state.run_locks
+    limiter: RateLimiter = request.app.state.rate_limiter
+    if not locks.try_acquire(conversation_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "A reply is already being generated in this conversation."
+        )
+    retry_after = limiter.hit(user.customer_id)
+    if retry_after is not None:
+        locks.release(conversation_id)
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many messages. Please wait a moment.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     agent = Agent(
         llm, registry, max_steps=settings.AGENT_MAX_STEPS, timeout_s=settings.AGENT_TIMEOUT_S
     )
     return StreamingResponse(
-        stream_turn(agent, sessions, user, conversation_id, body.text, history),
+        stream_turn(
+            agent,
+            sessions,
+            user,
+            conversation_id,
+            body.text,
+            history,
+            release=lambda: locks.release(conversation_id),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

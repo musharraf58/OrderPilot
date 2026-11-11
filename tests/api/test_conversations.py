@@ -1,84 +1,19 @@
 import json
 from uuid import uuid4
 
-import pytest
-
 from app.agent.llm import (
-    LLMResponse,
     LLMUnavailable,
-    ScriptedLLM,
-    ToolCall,
     ToolCallMessage,
     ToolResultMessage,
-    Usage,
     UserMessage,
 )
 from app.agent.loop import ERROR_MESSAGE, MAX_STEPS_MESSAGE
 from app.db.repositories import ConversationRepository
+from tests.api.helpers import parse_sse, text, tool_calls
 from tests.conftest import AUTH
-from tests.factories import CUSTOMER_ID, me, order
+from tests.factories import order
 
 OTHER_CUSTOMER = uuid4()
-
-
-def parse_sse(body: str) -> list[tuple[str, dict]]:
-    events = []
-    for block in body.strip().split("\n\n"):
-        fields = dict(line.split(": ", 1) for line in block.splitlines())
-        events.append((fields["event"], json.loads(fields["data"])))
-    return events
-
-
-def text(t):
-    return LLMResponse(text=t, usage=Usage(input_tokens=3, output_tokens=1))
-
-
-def tool_calls(*specs):
-    return LLMResponse(
-        tool_calls=[
-            ToolCall(
-                id=f"g{i}",
-                name=name,
-                arguments=args,
-                provider_data={"gemini_id": f"g{i}", "gemini_thought_signature": "U0lH"},
-            )
-            for i, (name, args) in enumerate(specs)
-        ]
-    )
-
-
-@pytest.fixture
-def chat(api_app, api, store, sessionmaker):
-    """The API with a test DB; call chat.script([...]) to give it a ScriptedLLM."""
-    store.get("/auth/me").respond(200, json=me())
-    api_app.state.sessionmaker = sessionmaker
-
-    class Chat:
-        client = api
-        sessions = sessionmaker
-        llm: ScriptedLLM | None = None
-
-        def script(self, steps, chunk_size=4):
-            self.llm = ScriptedLLM(steps, chunk_size=chunk_size)
-            api_app.state.llm = self.llm
-            return self.llm
-
-        async def new(self):
-            r = await api.post("/conversations", headers=AUTH)
-            assert r.status_code == 201
-            return r.json()["id"]
-
-        async def send(self, conversation_id, message):
-            r = await api.post(
-                f"/conversations/{conversation_id}/messages", json={"text": message}, headers=AUTH
-            )
-            return r
-
-        async def rows(self, conversation_id):
-            async with sessionmaker() as s:
-                return await ConversationRepository(s).load_messages(CUSTOMER_ID, conversation_id)
-
-    return Chat()
 
 
 async def test_create_list_get(chat):
