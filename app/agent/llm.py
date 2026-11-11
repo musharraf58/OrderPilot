@@ -5,7 +5,7 @@ The loop only ever sees the message types defined here. Each provider adapter
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
@@ -88,6 +88,19 @@ class LLMClient(ABC):
     ) -> LLMResponse:
         """Send the conversation and the offered tool schemas; return the model's turn."""
 
+    async def generate_stream(
+        self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
+    ) -> AsyncIterator[str | LLMResponse]:
+        """Like generate, but yields text pieces as they arrive, then the full LLMResponse.
+
+        The final LLMResponse is always the last item and has the complete text (or the
+        tool calls) and usage. This default streams nothing until the response is complete.
+        """
+        response = await self.generate(system, messages, tools)
+        if response.text:
+            yield response.text
+        yield response
+
 
 ScriptStep = LLMResponse | Exception | Callable[[], Awaitable[LLMResponse]]
 
@@ -99,9 +112,11 @@ class ScriptedLLM(LLMClient):
     for simulating a slow model).
     """
 
-    def __init__(self, steps: Sequence[ScriptStep]) -> None:
+    def __init__(self, steps: Sequence[ScriptStep], *, chunk_size: int | None = None) -> None:
         self._steps = list(steps)
         self.requests: list[dict[str, Any]] = []
+        # Streaming mode: split text answers into pieces of this many characters.
+        self.chunk_size = chunk_size
 
     async def generate(
         self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
@@ -117,3 +132,13 @@ class ScriptedLLM(LLMClient):
         if callable(step):
             return await step()
         return step
+
+    async def generate_stream(
+        self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
+    ) -> AsyncIterator[str | LLMResponse]:
+        response = await self.generate(system, messages, tools)
+        if response.text:
+            size = self.chunk_size or len(response.text)
+            for start in range(0, len(response.text), size):
+                yield response.text[start : start + size]
+        yield response

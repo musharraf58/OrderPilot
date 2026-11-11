@@ -151,3 +151,99 @@ def test_config_offers_tools_and_disables_automatic_calling(client):
     decl = config.tools[0].function_declarations[0]
     assert (decl.name, decl.parameters_json_schema["type"]) == ("t", "object")
     assert client._config("sys", []).tools is None
+
+
+# --- streaming ----------------------------------------------------------------
+
+
+def chunk(*parts, prompt=10, cand=0, finish=None):
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=list(parts)), finish_reason=finish
+            )
+        ],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=prompt, candidates_token_count=cand
+        ),
+    )
+
+
+def stream_of(*chunks, fail_after=None):
+    async def gen():
+        for i, c in enumerate(chunks):
+            if fail_after is not None and i == fail_after:
+                raise httpx.ReadError("connection dropped")
+            yield c
+
+    return gen()
+
+
+async def collect(client, **kwargs):
+    return [item async for item in client.generate_stream("sys", [UserMessage(text="hi")], [])]
+
+
+async def test_stream_yields_text_pieces_then_full_response(client, monkeypatch):
+    chunks = [
+        chunk(types.Part(text="Hel"), cand=1),
+        chunk(types.Part(text="lo!"), cand=2),
+        chunk(types.Part(text="", thought_signature=SIG), cand=2, finish="STOP"),
+    ]
+    monkeypatch.setattr(client, "_call_stream", AsyncMock(return_value=stream_of(*chunks)))
+    items = await collect(client)
+    assert items[:-1] == ["Hel", "lo!"]
+    final = items[-1]
+    assert final.text == "Hello!"
+    # Usage is cumulative per chunk: the last value is the total, not a sum.
+    assert (final.usage.input_tokens, final.usage.output_tokens) == (10, 2)
+
+
+async def test_stream_collects_function_calls_with_signature(client, monkeypatch):
+    chunks = [
+        chunk(
+            types.Part(
+                function_call=types.FunctionCall(id="g1", name="get_order", args={"order_id": "A"}),
+                thought_signature=SIG,
+            )
+        ),
+        chunk(types.Part(function_call=types.FunctionCall(id="g2", name="get_order", args={}))),
+        chunk(types.Part(text=""), finish="STOP"),
+    ]
+    monkeypatch.setattr(client, "_call_stream", AsyncMock(return_value=stream_of(*chunks)))
+    items = await collect(client)
+    assert len(items) == 1  # no text pieces
+    calls = items[0].tool_calls
+    assert [c.id for c in calls] == ["g1", "g2"]
+    assert base64.b64decode(calls[0].provider_data["gemini_thought_signature"]) == SIG
+
+
+async def test_stream_retries_before_first_chunk(client, monkeypatch):
+    call = AsyncMock(side_effect=[api_error(503), stream_of(chunk(types.Part(text="ok")))])
+    monkeypatch.setattr(client, "_call_stream", call)
+    items = await collect(client)
+    assert items[-1].text == "ok"
+    assert call.await_count == 2
+
+
+async def test_stream_failure_after_text_is_not_retried(client, monkeypatch):
+    call = AsyncMock(
+        return_value=stream_of(
+            chunk(types.Part(text="partial")), chunk(types.Part(text="x")), fail_after=1
+        )
+    )
+    monkeypatch.setattr(client, "_call_stream", call)
+    seen = []
+    with pytest.raises(LLMUnavailable):
+        async for item in client.generate_stream("sys", [UserMessage(text="hi")], []):
+            seen.append(item)
+    assert seen == ["partial"]
+    assert call.await_count == 1
+
+
+async def test_scripted_llm_streaming_mode_chunks_text():
+    from app.agent.llm import LLMResponse, ScriptedLLM
+
+    llm = ScriptedLLM([LLMResponse(text="abcdefg")], chunk_size=3)
+    items = [i async for i in llm.generate_stream("sys", [UserMessage(text="hi")], [])]
+    assert items[:-1] == ["abc", "def", "g"]
+    assert items[-1].text == "abcdefg"

@@ -7,7 +7,7 @@ import asyncio
 import base64
 import logging
 import random
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -151,6 +151,13 @@ class GeminiClient(LLMClient):
             model=self._model, contents=contents, config=config
         )
 
+    async def _call_stream(
+        self, contents: list[types.Content], config: types.GenerateContentConfig
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        return await self._client.aio.models.generate_content_stream(
+            model=self._model, contents=contents, config=config
+        )
+
     def _config(self, system: str, tools: list[dict[str, Any]]) -> types.GenerateContentConfig:
         declarations = [
             types.FunctionDeclaration(
@@ -165,18 +172,15 @@ class GeminiClient(LLMClient):
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
-    async def generate(
-        self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
-    ) -> LLMResponse:
-        contents = to_gemini_contents(messages)
-        config = self._config(system, tools)
+    async def _with_retries[T](self, attempt_fn: Callable[[], Awaitable[T]]) -> T:
+        """Run attempt_fn, retrying 429/5xx/network errors with exponential backoff."""
         error: LLMError = LLMUnavailable("no attempts made")
         for attempt in range(self._max_attempts):
             if attempt:
                 delay = min(self._backoff * 2 ** (attempt - 1), self._max_backoff)
                 await self._sleep(delay + random.uniform(0, delay / 4))
             try:
-                response = await self._call(contents, config)
+                return await attempt_fn()
             except errors.APIError as exc:
                 if exc.code == 429:
                     error = LLMRateLimited("Gemini rate limit exceeded")
@@ -185,10 +189,66 @@ class GeminiClient(LLMClient):
                 else:
                     raise LLMError(f"Gemini rejected the request ({exc.code})") from exc
                 logger.warning("gemini attempt %d failed: %s", attempt + 1, exc.code)
-                continue
             except (httpx.HTTPError, TimeoutError) as exc:
                 error = LLMUnavailable(f"Gemini unreachable: {type(exc).__name__}")
                 logger.warning("gemini attempt %d failed: %s", attempt + 1, type(exc).__name__)
-                continue
-            return from_gemini_response(response)
         raise error
+
+    async def generate(
+        self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
+    ) -> LLMResponse:
+        contents = to_gemini_contents(messages)
+        config = self._config(system, tools)
+        response = await self._with_retries(lambda: self._call(contents, config))
+        return from_gemini_response(response)
+
+    async def generate_stream(
+        self, system: str, messages: Sequence[Message], tools: list[dict[str, Any]]
+    ) -> AsyncIterator[str | LLMResponse]:
+        """Stream text as it arrives; collect function calls and return them at the end.
+
+        Verified against the live API: function calls arrive as whole parts (the first of
+        a parallel batch carries the thought signature), usage_metadata is cumulative so
+        the last chunk's value is the total, and empty text parts can appear.
+        Retries only happen before the first chunk: once text has been yielded, retrying
+        would repeat it, so a later failure becomes an LLMError.
+        """
+        contents = to_gemini_contents(messages)
+        config = self._config(system, tools)
+
+        async def open_stream() -> tuple[Any, types.GenerateContentResponse | None]:
+            stream = await self._call_stream(contents, config)
+            first = await anext(aiter(stream), None)
+            return stream, first
+
+        stream, chunk = await self._with_retries(open_stream)
+        parts: list[types.Part] = []
+        usage = None
+        finish_reason = None
+        try:
+            while chunk is not None:
+                candidate = chunk.candidates[0] if chunk.candidates else None
+                for part in (
+                    candidate.content.parts if candidate and candidate.content else None
+                ) or []:
+                    parts.append(part)
+                    if part.text and not part.thought and not part.function_call:
+                        yield part.text
+                usage = chunk.usage_metadata or usage
+                if candidate and candidate.finish_reason:
+                    finish_reason = candidate.finish_reason
+                chunk = await anext(aiter(stream), None)
+        except (errors.APIError, httpx.HTTPError, TimeoutError) as exc:
+            raise LLMUnavailable(f"Gemini stream failed: {type(exc).__name__}") from exc
+
+        yield from_gemini_response(
+            types.GenerateContentResponse(
+                candidates=[
+                    types.Candidate(
+                        content=types.Content(role="model", parts=parts),
+                        finish_reason=finish_reason,
+                    )
+                ],
+                usage_metadata=usage,
+            )
+        )
