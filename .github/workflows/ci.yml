@@ -33,3 +33,5 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      # The app must import with runtime dependencies only (what the Docker image has).
+      - run: uv run --no-dev --exact python -c "import app.main"
