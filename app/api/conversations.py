@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.history import window
@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.limits import RateLimiter, RunLocks
 from app.db.models import Conversation
 from app.db.models import Message as MessageRow
-from app.db.repositories import ConversationRepository
+from app.db.repositories import ConversationRepository, PendingActionRepository
 from app.db.repositories.conversations import to_message
 from app.tools.context import UserContext
 from app.tools.registry import ToolRegistry
@@ -51,12 +51,31 @@ class ToolItem(BaseModel):
     created_at: datetime
 
 
+class PendingActionOut(BaseModel):
+    id: UUID
+    tool_name: str
+    summary: str
+    expires_at: datetime
+
+
 class ConversationDetail(ConversationOut):
     items: list[MessageItem | ToolItem]
+    # A proposed action waiting for the customer's confirm/cancel, if any.
+    pending_action: PendingActionOut | None
 
 
 class SendMessage(BaseModel):
-    text: str = Field(min_length=1, max_length=4000)
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def _length(cls, text: str) -> str:
+        if not text.strip():
+            raise ValueError("Message must not be empty.")
+        limit = get_settings().MAX_MESSAGE_CHARS
+        if len(text) > limit:
+            raise ValueError(f"Message is too long (at most {limit} characters).")
+        return text
 
 
 def _sessionmaker(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -82,6 +101,9 @@ def _display_items(rows: Sequence[MessageRow]) -> list[MessageItem | ToolItem]:
                 )
             )
         elif row.role == "tool_result":
+            error = row.content["result"].get("error") or {}
+            if error.get("code") == "awaiting_confirmation":
+                continue  # shown as the confirmation prompt, not as a failed tool
             items.append(
                 ToolItem(
                     name=row.content["name"],
@@ -118,7 +140,14 @@ async def get_conversation(
         if conversation is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
         rows = await repo.load_messages(user.customer_id, conversation_id)
-    return ConversationDetail(**_out(conversation).model_dump(), items=_display_items(rows))
+        action = await PendingActionRepository(s).current(user.customer_id, conversation_id)
+    return ConversationDetail(
+        **_out(conversation).model_dump(),
+        items=_display_items(rows),
+        pending_action=PendingActionOut.model_validate(action, from_attributes=True)
+        if action
+        else None,
+    )
 
 
 def sse(event: str, data: dict[str, Any]) -> str:
@@ -139,6 +168,7 @@ async def stream_turn(
     text: str,
     history: list[Message],
     release: Callable[[], None],
+    action_ttl_s: float,
 ) -> AsyncIterator[str]:
     """Run the agent and translate its events to SSE; persist the turn when it ends."""
     try:
@@ -154,10 +184,21 @@ async def stream_turn(
                     # result.history = the history we sent + this turn's messages. For a
                     # failed or truncated turn it is only the user message and the fallback.
                     new_messages = result.history[len(history) :]
+                    action = None
+                    # One transaction: the turn's messages and (if any) the proposed action.
                     async with sessions() as s, s.begin():
                         rows = await ConversationRepository(s).append_turn(
                             user.customer_id, conversation_id, new_messages
                         )
+                        if result.proposal is not None:
+                            action = await PendingActionRepository(s).create(
+                                user.customer_id,
+                                conversation_id,
+                                result.proposal.tool_name,
+                                result.proposal.arguments,
+                                result.proposal.summary,
+                                ttl_s=action_ttl_s,
+                            )
                     trace = result.trace
                     logger.info(
                         "turn %s: steps=%d tools=%s latency_ms=%.0f tokens_in=%d tokens_out=%d",
@@ -172,6 +213,15 @@ async def stream_turn(
                         yield sse(
                             "error",
                             {"code": _error_code(trace.reason), "message": result.final_text},
+                        )
+                    if action is not None:
+                        yield sse(
+                            "confirmation_required",
+                            {
+                                "action_id": str(action.id),
+                                "summary": action.summary,
+                                "expires_at": action.expires_at.isoformat(),
+                            },
                         )
                     yield sse("done", {"message_id": str(rows[-1].id)})
     except Exception:
@@ -201,14 +251,12 @@ async def send_message(
     """
     settings = get_settings()
     async with sessions() as s:
-        repo = ConversationRepository(s)
-        if await repo.get(user.customer_id, conversation_id) is None:
+        if await ConversationRepository(s).get(user.customer_id, conversation_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
-        rows = await repo.load_messages(user.customer_id, conversation_id)
-    history = window([to_message(r) for r in rows], settings.HISTORY_WINDOW)
 
-    # From here to the return there is no await, so these checks and the lock acquisition
-    # cannot interleave with another request.
+    # No await between the lock and the rate-limit check, so they cannot interleave with
+    # another request. History is loaded only once we hold the lock, so it can't change
+    # underneath this turn (e.g. by a confirm finishing).
     locks: RunLocks = request.app.state.run_locks
     limiter: RateLimiter = request.app.state.rate_limiter
     if not locks.try_acquire(conversation_id):
@@ -223,9 +271,22 @@ async def send_message(
             "Too many messages. Please wait a moment.",
             headers={"Retry-After": str(retry_after)},
         )
+    try:
+        async with sessions() as s, s.begin():
+            # The customer moved on: an action still waiting for confirmation no longer applies.
+            await PendingActionRepository(s).close_pending(user.customer_id, conversation_id)
+            rows = await ConversationRepository(s).load_messages(user.customer_id, conversation_id)
+    except BaseException:
+        locks.release(conversation_id)
+        raise
+    history = window([to_message(r) for r in rows], settings.HISTORY_WINDOW)
 
     agent = Agent(
-        llm, registry, max_steps=settings.AGENT_MAX_STEPS, timeout_s=settings.AGENT_TIMEOUT_S
+        llm,
+        registry,
+        max_steps=settings.AGENT_MAX_STEPS,
+        timeout_s=settings.AGENT_TIMEOUT_S,
+        allow_writes=settings.AGENT_ALLOW_WRITES,
     )
     return StreamingResponse(
         stream_turn(
@@ -236,6 +297,7 @@ async def send_message(
             body.text,
             history,
             release=lambda: locks.release(conversation_id),
+            action_ttl_s=settings.ACTION_TTL_S,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
