@@ -28,7 +28,17 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Tests use a stubbed DB session, so no database is needed.
+Tests never call the real model or the real store (a scripted LLM and mocked HTTP are
+used). The database tests need a real Postgres (JSONB); they create an `orderpilot_test`
+database and run the Alembic migrations on it. Point them at the compose Postgres:
+
+```bash
+DB_PORT=5433 docker compose up -d db   # any free port
+TEST_DATABASE_URL=postgresql+asyncpg://orderpilot:orderpilot@localhost:5433/orderpilot_test \
+  uv run pytest
+```
+
+Without a reachable database those tests are skipped locally; in CI they must pass.
 
 ## Tool design
 
@@ -103,12 +113,63 @@ Chat with it in the terminal (real store + real Gemini, not run in CI):
 uv run python scripts/chat.py --trace
 ```
 
+## API
+
+All endpoints except `/health*` and `/auth/login` need `Authorization: Bearer <token>`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness, always 200 |
+| GET | `/health/ready` | Readiness: 200 if the database answers, else 503 |
+| POST | `/auth/login` | `{email, password}` is forwarded to the store; returns `{access_token, token_type}`. Nothing is stored. |
+| GET | `/auth/me` | `{customer_id}` for the token |
+| POST | `/conversations` | Create a conversation (201) |
+| GET | `/conversations` | Your conversations, most recently active first |
+| GET | `/conversations/{id}` | One conversation with display items: user/assistant text and tool summaries |
+| POST | `/conversations/{id}/messages` | `{text}`: runs the agent and streams the reply as SSE |
+
+- Another customer's conversation and a nonexistent one both return **404**.
+- An invalid token returns **401**. Token lookups are cached in memory for 60 s.
+- Sending a message while a reply is still being generated in that conversation returns **409**.
+- More than 20 messages per 10 minutes per customer returns **429** with `Retry-After`.
+  (Rate limit and run lock are in memory, per process.)
+
+### SSE events (`POST /conversations/{id}/messages`)
+
+Each event is `event: <name>` plus one JSON `data:` line.
+
+| Event | Data | Meaning |
+|---|---|---|
+| `tool_started` | `{name}` | The agent started a tool call |
+| `tool_finished` | `{name, ok}` | That tool call finished (`ok: false` = it returned an error to the agent) |
+| `text_delta` | `{text}` | The next piece of the answer; concatenate them |
+| `error` | `{code, message}` | The turn failed or was cut short (`timeout`, `max_steps`, `llm_error`, `internal_error`). Show `message` instead of any partial text. |
+| `done` | `{message_id}` | The turn is saved; `message_id` is the stored assistant message |
+
+A normal turn is `tool_*`... `text_delta`... `done`. A failed one ends with `error` then
+`done` (the fallback answer is saved), or with just `error` if saving itself failed.
+
+### History
+
+Every message is stored, including tool calls, tool results and the model's opaque
+provider data (Gemini thought signatures), so a conversation can be replayed exactly. The
+model gets only the last `HISTORY_WINDOW` (20) messages, and the window always starts at
+a user message, so a tool call is never separated from its result. A turn is saved in one
+transaction when it ends; a failed or truncated turn saves only the question and the
+fallback answer.
+
+Chat with the running API from the terminal (answers stream in live):
+
+```bash
+uv run python scripts/chat.py --api http://localhost:8000 --trace
+```
+
 ## Roadmap
 
 - [x] Phase 0: Project foundation (config, logging, health checks, Docker, CI)
 - [x] Phase 1: Tool layer (store client, typed tools, registry)
 - [x] Phase 2: Agent loop (provider-neutral LLM interface, Gemini adapter, traces)
-- [ ] Phase 3: TBD
+- [x] Phase 3: Conversations, persistence (Postgres + Alembic) and SSE streaming
 - [ ] Phase 4: TBD
 - [ ] Phase 5: TBD
 - [ ] Phase 6: TBD
