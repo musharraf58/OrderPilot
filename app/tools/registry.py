@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.clients.store import StoreClient
 from app.tools.base import Tool, ToolResult
@@ -51,17 +51,26 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
-    async def execute(
-        self, name: str, raw_args: dict[str, Any] | None, ctx: UserContext
-    ) -> ToolResult:
-        """Validate the model's arguments and run the tool. Never raises."""
+    def prepare(
+        self, name: str, raw_args: dict[str, Any] | None
+    ) -> tuple[Tool, BaseModel] | ToolResult:
+        """Look up the tool and validate the arguments: (tool, args), or a failure result."""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult.failure("unknown_tool", f"There is no tool named '{name}'.")
         try:
-            args = tool.input_model.model_validate(raw_args or {})
+            return tool, tool.input_model.model_validate(raw_args or {})
         except ValidationError as exc:
             return ToolResult.failure("invalid_arguments", _describe_validation_error(exc))
+
+    async def execute(
+        self, name: str, raw_args: dict[str, Any] | None, ctx: UserContext
+    ) -> ToolResult:
+        """Validate the model's arguments and run the tool. Never raises."""
+        prepared = self.prepare(name, raw_args)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        tool, args = prepared
         try:
             return await tool.run(args, ctx)
         except Exception:

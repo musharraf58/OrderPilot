@@ -26,6 +26,9 @@ class ToolCallStep(BaseModel):
     result: ToolResult
     latency_ms: float
     refused: bool = Field(default=False, description="Blocked by the loop, never executed.")
+    proposed: bool = Field(
+        default=False, description="A write turned into a proposal; not executed."
+    )
 
 
 Step = Annotated[ModelCallStep | ToolCallStep, Field(discriminator="type")]

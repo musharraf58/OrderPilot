@@ -35,12 +35,37 @@ TIMEOUT_MESSAGE = "Sorry, that took too long. Please try again in a moment."
 ERROR_MESSAGE = "Sorry, I'm having trouble answering right now. Please try again shortly."
 
 
+AWAITING_CONFIRMATION = ToolResult.failure(
+    "awaiting_confirmation",
+    "The customer has been asked to confirm this action in the app. It has not been done.",
+)
+ONLY_ONE_ACTION = ToolResult.failure(
+    "not_allowed", "Only one action can be proposed at a time; this one was not proposed."
+)
+
+
+def confirmation_text(summary: str) -> str:
+    """What the customer reads when an action is proposed. Written by code, not the model."""
+    return f"{summary}\n\nNothing has been changed yet. Please confirm or cancel this action."
+
+
+class ActionProposal(BaseModel):
+    """A write the model asked for. Not executed: the API stores it for confirmation."""
+
+    call_id: str
+    tool_name: str
+    arguments: dict[str, Any]  # validated by the tool's input model, then fixed
+    summary: str
+
+
 class AgentResult(BaseModel):
     final_text: str
     trace: Trace
     usage: Usage
     # The conversation to pass as `history` on the customer's next turn.
     history: list[Message]
+    # Set when the turn ended by proposing a write action for the customer to confirm.
+    proposal: ActionProposal | None = None
 
 
 class TextDelta(BaseModel):
@@ -123,6 +148,7 @@ class Agent:
         deadline = loop.time() + self.timeout_s
         tools = self.offered_tools()
         final_text: str | None = None
+        proposal: ActionProposal | None = None
 
         try:
             for _ in range(self.max_steps):
@@ -160,15 +186,30 @@ class Agent:
                 messages.append(ToolCallMessage(calls=response.tool_calls))
                 # Sequential on purpose: deterministic order, and no bursts on the store.
                 for call in response.tool_calls:
-                    yield ToolStarted(name=call.name, call_id=call.id)
-                    async with asyncio.timeout_at(deadline):
-                        result = await self._execute(call, trace, ctx)
-                    yield ToolFinished(name=call.name, call_id=call.id, ok=result.ok)
+                    if self._is_write(call.name) and self.allow_writes:
+                        # Writes are never executed here: at most one becomes a proposal.
+                        async with asyncio.timeout_at(deadline):
+                            result, new_proposal = await self._propose(
+                                call, trace, ctx, already_proposed=proposal is not None
+                            )
+                        proposal = proposal or new_proposal
+                        if new_proposal is None:
+                            yield ToolStarted(name=call.name, call_id=call.id)
+                            yield ToolFinished(name=call.name, call_id=call.id, ok=False)
+                    else:
+                        yield ToolStarted(name=call.name, call_id=call.id)
+                        async with asyncio.timeout_at(deadline):
+                            result = await self._execute(call, trace, ctx)
+                        yield ToolFinished(name=call.name, call_id=call.id, ok=result.ok)
                     messages.append(
                         ToolResultMessage(
                             call_id=call.id, name=call.name, result=result.model_dump(mode="json")
                         )
                     )
+                if proposal is not None:
+                    # End the turn: the customer decides, through the API, not the model.
+                    final_text = confirmation_text(proposal.summary)
+                    break
         except TimeoutError:
             if loop.time() < deadline:
                 raise
@@ -198,9 +239,55 @@ class Agent:
         trace.total_latency_ms = _ms_since(start)
         yield Finished(
             result=AgentResult(
-                final_text=final_text, trace=trace, usage=trace.usage, history=messages
+                final_text=final_text,
+                trace=trace,
+                usage=trace.usage,
+                history=messages,
+                proposal=proposal if trace.outcome == "completed" else None,
             )
         )
+
+    def _is_write(self, name: str) -> bool:
+        tool = self.registry.get(name)
+        return tool is not None and tool.kind == "write"
+
+    async def _propose(
+        self, call: ToolCall, trace: Trace, ctx: UserContext, *, already_proposed: bool
+    ) -> tuple[ToolResult, ActionProposal | None]:
+        """Turn a write call into a proposal (never executing it), or explain why not."""
+        started = time.perf_counter()
+        proposal = None
+        if already_proposed:
+            result = ONLY_ONE_ACTION
+        else:
+            prepared = self.registry.prepare(call.name, call.arguments)
+            if isinstance(prepared, ToolResult):
+                result = prepared
+            else:
+                tool, args = prepared
+                # Checks ownership and feasibility on fresh store data; refuses early if not.
+                described = await tool.propose(args, ctx)
+                if described.ok:
+                    proposal = ActionProposal(
+                        call_id=call.id,
+                        tool_name=tool.name,
+                        arguments=args.model_dump(mode="json"),
+                        summary=described.data["summary"],
+                    )
+                    result = AWAITING_CONFIRMATION
+                else:
+                    result = described
+        trace.steps.append(
+            ToolCallStep(
+                call_id=call.id,
+                name=call.name,
+                arguments=call.arguments,
+                result=result,
+                latency_ms=_ms_since(started),
+                proposed=proposal is not None,
+            )
+        )
+        return result, proposal
 
     async def _execute(self, call: ToolCall, trace: Trace, ctx: UserContext) -> ToolResult:
         started = time.perf_counter()
