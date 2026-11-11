@@ -4,11 +4,15 @@ import pytest
 import respx
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.clients.store import StoreClient
 from app.main import create_app
 from app.tools.context import UserContext
 from app.tools.registry import build_default_registry
+from tests.database import migrate_test_database
 from tests.factories import BASE_URL, CUSTOMER_ID
 
 TOKEN = "customer-token"
@@ -40,3 +44,18 @@ def app():
 async def client(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+
+
+@pytest.fixture(scope="session")
+def database_url():
+    return migrate_test_database()
+
+
+@pytest.fixture
+async def sessionmaker(database_url):
+    """A clean database for each test (tables truncated, schema kept)."""
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.execute(text("TRUNCATE conversations, messages CASCADE"))
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()

@@ -6,9 +6,9 @@ The loop only ever sees the message types defined here. Each provider adapter
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 
 class ToolCall(BaseModel):
@@ -45,6 +45,9 @@ class ToolResultMessage(BaseModel):
 
 
 Message = UserMessage | AssistantMessage | ToolCallMessage | ToolResultMessage
+
+# Parses any stored message back into the right class, using `role` as the discriminator.
+MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Annotated[Message, Field(discriminator="role")])
 
 
 class Usage(BaseModel):

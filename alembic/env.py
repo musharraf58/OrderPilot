@@ -13,18 +13,23 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
-if config.config_file_name is not None:
+# Skipped when called from code (e.g. tests), where it would disable the app's loggers.
+if config.config_file_name is not None and not config.attributes.get("skip_logging_config"):
     fileConfig(config.config_file_name)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
+import app.db.models  # noqa: E402, F401  (registers the tables on Base.metadata)
 from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
-# Use the app's own DATABASE_URL rather than duplicating it in alembic.ini.
-config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
+# Use the app's own DATABASE_URL rather than duplicating it in alembic.ini, unless the
+# caller passed one explicitly (tests point migrations at the test database).
+config.set_main_option(
+    "sqlalchemy.url", config.attributes.get("database_url") or get_settings().DATABASE_URL
+)
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
