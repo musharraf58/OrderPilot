@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import auth, health
+from app.api import auth, conversations, health
 from app.clients.store import StoreClient
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(conversations.router)
     return app
 
 
