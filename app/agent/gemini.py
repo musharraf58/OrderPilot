@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Keys inside ToolCall.provider_data.
 _NATIVE_ID = "gemini_id"
 _SIGNATURE = "gemini_thought_signature"
+# Google's documented placeholder signature for function calls the application adds to the
+# history itself. Verified against the live API: accepted, while a made-up value is rejected
+# with "Corrupted thought signature".
+_INJECTED_SIGNATURE = b"skip_thought_signature_validator"
 
 
 def to_gemini_contents(messages: Sequence[Message]) -> list[types.Content]:
@@ -59,12 +63,16 @@ def to_gemini_contents(messages: Sequence[Message]) -> list[types.Content]:
                     calls_by_id[call.id] = call
                     data = call.provider_data or {}
                     signature = data.get(_SIGNATURE)
+                    if signature:
+                        thought_signature = base64.b64decode(signature)
+                    else:
+                        thought_signature = _INJECTED_SIGNATURE if call.injected else None
                     parts.append(
                         types.Part(
                             function_call=types.FunctionCall(
                                 id=data.get(_NATIVE_ID), name=call.name, args=call.arguments
                             ),
-                            thought_signature=base64.b64decode(signature) if signature else None,
+                            thought_signature=thought_signature,
                         )
                     )
                 contents.append(types.Content(role="model", parts=parts))

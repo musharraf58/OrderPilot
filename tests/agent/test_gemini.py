@@ -247,3 +247,24 @@ async def test_scripted_llm_streaming_mode_chunks_text():
     items = [i async for i in llm.generate_stream("sys", [UserMessage(text="hi")], [])]
     assert items[:-1] == ["abc", "def", "g"]
     assert items[-1].text == "abcdefg"
+
+
+def test_injected_calls_get_the_documented_placeholder_signature():
+    contents = to_gemini_contents(
+        [
+            UserMessage(text="cancel it"),
+            ToolCallMessage(
+                calls=[ToolCall(id="action_1", name="cancel_order", arguments={}, injected=True)]
+            ),
+            ToolResultMessage(call_id="action_1", name="cancel_order", result={"ok": True}),
+        ]
+    )
+    assert contents[1].parts[0].thought_signature == b"skip_thought_signature_validator"
+    assert contents[1].parts[0].function_call.id is None
+
+
+def test_model_calls_without_signature_stay_unsigned():
+    contents = to_gemini_contents(
+        [ToolCallMessage(calls=[ToolCall(id="c", name="t", arguments={})])]
+    )
+    assert contents[0].parts[0].thought_signature is None

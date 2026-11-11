@@ -18,6 +18,9 @@ class ToolCall(BaseModel):
     # Opaque provider data that must be replayed with this call (e.g. Gemini's thought
     # signature). The loop never reads it.
     provider_data: dict[str, Any] | None = None
+    # True for calls our code recorded itself (e.g. an action the customer confirmed in the
+    # app), as opposed to calls the model requested.
+    injected: bool = False
 
 
 class UserMessage(BaseModel):
