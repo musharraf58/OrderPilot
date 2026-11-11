@@ -6,6 +6,12 @@ GEMINI_API_KEY and optionally GEMINI_MODEL from .env.
 
     uv run python scripts/chat.py            # type 'exit' or Ctrl-D to quit
     uv run python scripts/chat.py --trace    # also print every step after each answer
+
+With --api it talks to the running OrderPilot API over HTTP instead (login, a new
+conversation, answers streamed live over SSE). It then only needs STORE_EMAIL and
+STORE_PASSWORD; the API holds the Gemini key.
+
+    uv run python scripts/chat.py --api http://localhost:8000 [--trace]
 """
 
 import argparse
@@ -13,7 +19,9 @@ import asyncio
 import json
 import sys
 import warnings
+from collections.abc import AsyncIterator
 
+import httpx
 from _env import load_env, store_token
 
 from app.agent.llm import Message
@@ -46,6 +54,71 @@ def print_trace(trace: Trace) -> None:
     )
 
 
+async def read_question() -> str | None:
+    try:
+        question = (await asyncio.to_thread(input, "\nyou> ")).strip()
+    except EOFError:
+        print()
+        return None
+    return None if question.lower() in {"exit", "quit"} else question
+
+
+async def iter_sse(response: httpx.Response) -> AsyncIterator[tuple[str, dict]]:
+    """Parse a text/event-stream response into (event, data) pairs as they arrive."""
+    event, data = "message", ""
+    async for line in response.aiter_lines():
+        if line.startswith("event:"):
+            event = line.partition(":")[2].strip()
+        elif line.startswith("data:"):
+            data += line.partition(":")[2].strip()
+        elif line == "" and data:
+            yield event, json.loads(data)
+            event, data = "message", ""
+
+
+async def main_api(base_url: str, show_trace: bool) -> int:
+    env = load_env()
+    if not (env.get("STORE_EMAIL") and env.get("STORE_PASSWORD")):
+        print("Set STORE_EMAIL and STORE_PASSWORD in .env.")
+        return 2
+    # Long read timeout: an agent turn can take a while (and the store may be waking up).
+    async with httpx.AsyncClient(base_url=base_url, timeout=httpx.Timeout(10, read=120)) as http:
+        login = await http.post(
+            "/auth/login", json={"email": env["STORE_EMAIL"], "password": env["STORE_PASSWORD"]}
+        )
+        if login.status_code != 200:
+            print(f"Login failed: HTTP {login.status_code} {login.text}")
+            return 1
+        http.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+        conversation = (await http.post("/conversations")).json()
+        print(f"OrderPilot API at {base_url}, conversation {conversation['id']}. 'exit' quits.")
+
+        while (question := await read_question()) is not None:
+            if not question:
+                continue
+            async with http.stream(
+                "POST", f"/conversations/{conversation['id']}/messages", json={"text": question}
+            ) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    print(f"HTTP {response.status_code}: {response.text}")
+                    continue
+                print("\norderpilot> ", end="", flush=True)
+                async for event, data in iter_sse(response):
+                    if event == "text_delta":
+                        print(data["text"], end="", flush=True)
+                    elif event == "error":
+                        print(f"\n[{data['code']}] {data['message']}", end="", flush=True)
+                    elif show_trace and event == "tool_started":
+                        print(f"\n  · {data['name']}…", end="", flush=True)
+                    elif show_trace and event == "tool_finished":
+                        print(" ok" if data["ok"] else " failed", end="\n", flush=True)
+                    elif show_trace and event == "done":
+                        print(f"\n  └─ done (message {data['message_id']})", end="")
+                print()
+    return 0
+
+
 async def main(show_trace: bool) -> int:
     env = load_env()
     missing = [k for k in ("STORE_API_URL", "GEMINI_API_KEY") if not env.get(k)]
@@ -75,14 +148,7 @@ async def main(show_trace: bool) -> int:
             f"OrderPilot ({model}). Signed in as customer {ctx.customer_id}. Type 'exit' to quit."
         )
         history: list[Message] = []
-        while True:
-            try:
-                question = (await asyncio.to_thread(input, "\nyou> ")).strip()
-            except EOFError:
-                print()
-                break
-            if question.lower() in {"exit", "quit"}:
-                break
+        while (question := await read_question()) is not None:
             if not question:
                 continue
             result = await agent.run(question, history, ctx)
@@ -96,4 +162,6 @@ async def main(show_trace: bool) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--trace", action="store_true", help="print each step after an answer")
-    sys.exit(asyncio.run(main(parser.parse_args().trace)))
+    parser.add_argument("--api", metavar="URL", help="talk to the running API over HTTP + SSE")
+    args = parser.parse_args()
+    sys.exit(asyncio.run(main_api(args.api, args.trace) if args.api else main(args.trace)))
