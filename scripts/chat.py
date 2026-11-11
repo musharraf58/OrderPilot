@@ -104,8 +104,11 @@ async def main_api(base_url: str, show_trace: bool) -> int:
                     print(f"HTTP {response.status_code}: {response.text}")
                     continue
                 print("\norderpilot> ", end="", flush=True)
+                proposal = None
                 async for event, data in iter_sse(response):
-                    if event == "text_delta":
+                    if event == "confirmation_required":
+                        proposal = data
+                    elif event == "text_delta":
                         print(data["text"], end="", flush=True)
                     elif event == "error":
                         print(f"\n[{data['code']}] {data['message']}", end="", flush=True)
@@ -116,7 +119,28 @@ async def main_api(base_url: str, show_trace: bool) -> int:
                     elif show_trace and event == "done":
                         print(f"\n  └─ done (message {data['message_id']})", end="")
                 print()
+            if proposal is not None:
+                await resolve_action(http, conversation["id"], proposal)
     return 0
+
+
+async def resolve_action(http: httpx.AsyncClient, conversation_id: str, proposal: dict) -> None:
+    """Ask the customer, then call the confirm or cancel endpoint. This separate,
+    authenticated call is the only thing that can make a write happen."""
+    print(f"\n  ┌─ action needs your confirmation (expires {proposal['expires_at']})")
+    print(f"  │ {proposal['summary']}")
+    try:
+        answer = (await asyncio.to_thread(input, "  └─ confirm? [y/N] ")).strip().lower()
+    except EOFError:
+        answer = ""
+    verb = "confirm" if answer in {"y", "yes"} else "cancel"
+    response = await http.post(
+        f"/conversations/{conversation_id}/actions/{proposal['action_id']}/{verb}"
+    )
+    if response.status_code == 200:
+        print(f"\norderpilot> {response.json()['message']}")
+    else:
+        print(f"\nHTTP {response.status_code}: {response.json().get('detail')}")
 
 
 async def main(show_trace: bool) -> int:
