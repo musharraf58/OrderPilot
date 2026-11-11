@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.clients.store import StoreClient
+from app.core.ttl_cache import TTLCache
 from app.main import create_app
 from app.tools.context import UserContext
 from app.tools.registry import build_default_registry
@@ -25,9 +26,14 @@ def store():
 
 
 @pytest.fixture
-async def registry(store):
+async def store_client(store):
     async with StoreClient(BASE_URL, sleep=AsyncMock()) as client:
-        yield build_default_registry(client)
+        yield client
+
+
+@pytest.fixture
+def registry(store_client):
+    return build_default_registry(store_client)
 
 
 @pytest.fixture
@@ -59,3 +65,39 @@ async def sessionmaker(database_url):
         await conn.execute(text("TRUNCATE conversations, messages CASCADE"))
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture
+def api_app(store_client, registry, clock):
+    """The real app, with app.state filled by test doubles instead of the lifespan.
+
+    Tests that need the database or a model set app.state.sessionmaker / app.state.llm.
+    """
+    app = create_app()
+    app.state.store = store_client
+    app.state.registry = registry
+    app.state.llm = None
+    app.state.auth_cache = TTLCache(ttl=60, clock=clock)
+    return app
+
+
+@pytest.fixture
+async def api(api_app):
+    async with AsyncClient(transport=ASGITransport(app=api_app), base_url="http://test") as c:
+        yield c
+
+
+AUTH = {"Authorization": f"Bearer {TOKEN}"}

@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
 
+    # Agent and conversations.
+    AGENT_MAX_STEPS: int = 6
+    AGENT_TIMEOUT_S: float = 60.0
+    HISTORY_WINDOW: int = 20  # messages sent to the model; everything is still stored
+
+    # Protection (in-memory, per process).
+    AUTH_CACHE_TTL_S: float = 60.0
+    RATE_LIMIT_MESSAGES: int = 20
+    RATE_LIMIT_WINDOW_S: float = 600.0
+
 
 @lru_cache
 def get_settings() -> Settings:
