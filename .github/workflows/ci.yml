@@ -7,6 +7,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orderpilot
+          POSTGRES_PASSWORD: orderpilot
+          POSTGRES_DB: orderpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orderpilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # The DB tests create this database and run the Alembic migrations on it.
+      TEST_DATABASE_URL: postgresql+asyncpg://orderpilot:orderpilot@localhost:5432/orderpilot_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
