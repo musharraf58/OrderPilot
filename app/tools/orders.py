@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.clients.store import Order, StoreConflict
-from app.tools.base import Tool, ToolFailure
+from app.tools.base import Tool, ToolFailure, ToolResult
 from app.tools.context import UserContext
 
 OrderStatus = Literal["pending", "paid", "shipped", "cancelled"]
@@ -122,22 +122,59 @@ class GetOrder(Tool):
         return order_details(order)
 
 
+def _order_label(order: Order) -> str:
+    date = datetime.fromisoformat(order.created_at)
+    items = sum(i.quantity for i in order.items)
+    return (
+        f"your order from {date.day} {date:%b %Y} "
+        f"({items} item{'s' if items != 1 else ''}, total ${order.total_amount})"
+    )
+
+
 class CancelOrder(Tool):
     name = "cancel_order"
     description = (
-        "Cancel one of the current customer's orders. This changes data and cannot be undone, "
-        "so only call it after the customer has clearly asked to cancel that specific order. "
-        "Only orders with status 'pending' can be cancelled; paid or shipped orders return "
-        "not_cancellable (refunds are not supported). Returns the order's new status."
+        "Propose cancelling one of the current customer's orders. Calling this does NOT cancel "
+        "anything: it asks the customer to confirm in the app, and the order is only cancelled "
+        "if they do. Only call it when the customer has explicitly asked to cancel a specific "
+        "order. Only orders with status 'pending' can be cancelled; paid or shipped orders "
+        "return not_cancellable (refunds are not supported). After calling it, the turn ends "
+        "and the customer is shown a confirmation prompt."
     )
     input_model = OrderIdInput
     kind = "write"
 
-    async def _execute(self, args: OrderIdInput, ctx: UserContext) -> dict[str, Any]:
+    async def _check_cancellable(self, args: OrderIdInput, ctx: UserContext) -> Order:
         order = await _find_owned_order(self, args.order_id, ctx)
         if order.status != "pending":
             reason = _NOT_CANCELLABLE_REASONS.get(order.status, "This order cannot be cancelled.")
             raise ToolFailure("not_cancellable", reason)
+        return order
+
+    async def describe(self, args: OrderIdInput, ctx: UserContext) -> str:
+        order = await self._check_cancellable(args, ctx)
+        return f"Cancel {_order_label(order)}? It is currently {order.status}."
+
+    def outcome_message(self, result: ToolResult) -> str:
+        if result.ok:
+            return "Done: the order is now cancelled."
+        code = result.error.code if result.error else ""
+        if code in ("not_cancellable", "not_found"):
+            return f"The order was not cancelled: {result.error.message}"
+        if code == "store_unavailable":
+            # A write that timed out may still have been applied, so don't claim either way.
+            return (
+                "I couldn't reach the store to finish this, so I can't tell whether the order "
+                "was cancelled. Please check your orders before trying again."
+            )
+        return (
+            "Something went wrong, and the order may not have been cancelled. "
+            "Please check your orders."
+        )
+
+    async def _execute(self, args: OrderIdInput, ctx: UserContext) -> dict[str, Any]:
+        # The same checks as at proposal time, re-run on fresh data at confirmation time.
+        await self._check_cancellable(args, ctx)
         try:
             cancelled = await self.client.cancel_order(
                 ctx.store_token.get_secret_value(), args.order_id

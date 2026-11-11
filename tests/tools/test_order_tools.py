@@ -221,3 +221,60 @@ def test_default_schemas_never_expose_identity(registry):
     for schema in registry.schemas():
         props = schema["parameters"].get("properties", {})
         assert not {"ctx", "customer_id", "user_id", "token", "store_token"} & set(props)
+
+
+# --- cancel_order proposals (describe) ----------------------------------------
+
+
+async def test_cancel_order_describe_summarises_from_fresh_store_data(registry, ctx, store):
+    target = order(status="pending", total_amount="144.90", created_at="2026-11-10T12:35:13")
+    store.get("/orders").respond(200, json=[target])
+    cancel = store.post(f"/orders/{target['id']}/cancel").respond(200, json=target)
+    tool = registry.get("cancel_order")
+    result = await tool.propose(tool.input_model(order_id=target["id"]), ctx)
+    assert result.ok
+    assert result.data["summary"] == (
+        "Cancel your order from 10 Nov 2026 (2 items, total $144.90)? It is currently pending."
+    )
+    assert not cancel.called  # describing never writes
+
+
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [("paid", "already been paid"), ("shipped", "already shipped"), ("cancelled", "already")],
+)
+async def test_cancel_order_describe_refuses_non_pending(registry, ctx, store, status, fragment):
+    target = order(status=status)
+    store.get("/orders").respond(200, json=[target])
+    tool = registry.get("cancel_order")
+    result = await tool.propose(tool.input_model(order_id=target["id"]), ctx)
+    assert (result.ok, result.error.code) == (False, "not_cancellable")
+    assert fragment in result.error.message
+
+
+async def test_cancel_order_describe_refuses_foreign_order(registry, ctx, store, my_orders):
+    store.get("/orders").respond(200, json=my_orders)
+    tool = registry.get("cancel_order")
+    result = await tool.propose(tool.input_model(order_id=FOREIGN_ORDER_ID), ctx)
+    assert (result.ok, result.error.code) == (False, "not_found")
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"ok": True, "data": {}}, "Done: the order is now cancelled."),
+        (
+            {"ok": False, "error": {"code": "not_cancellable", "message": "Already shipped."}},
+            "The order was not cancelled: Already shipped.",
+        ),
+        (
+            {"ok": False, "error": {"code": "store_unavailable", "message": "x"}},
+            "can't tell whether the order was cancelled",
+        ),
+    ],
+)
+def test_cancel_order_outcome_messages(registry, result, expected):
+    from app.tools.base import ToolResult
+
+    message = registry.get("cancel_order").outcome_message(ToolResult.model_validate(result))
+    assert expected in message

@@ -20,11 +20,17 @@ class Settings(BaseSettings):
     AGENT_MAX_STEPS: int = 6
     AGENT_TIMEOUT_S: float = 60.0
     HISTORY_WINDOW: int = 20  # messages sent to the model; everything is still stored
+    MAX_MESSAGE_CHARS: int = 1000
+
+    # Write actions (proposed by the model, confirmed by the customer through the API).
+    AGENT_ALLOW_WRITES: bool = True
+    ACTION_TTL_S: float = 600.0
 
     # Protection (in-memory, per process).
     AUTH_CACHE_TTL_S: float = 60.0
     RATE_LIMIT_MESSAGES: int = 20
     RATE_LIMIT_WINDOW_S: float = 600.0
+    ACTION_RATE_LIMIT: int = 20  # confirm/cancel calls per customer per window
 
 
 @lru_cache

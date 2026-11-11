@@ -1,5 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ ErrorCode = Literal[
     "conflict",
     "not_cancellable",
     "not_allowed",
+    "awaiting_confirmation",
     "store_unavailable",
     "store_error",
     "invalid_arguments",
@@ -95,9 +97,36 @@ class Tool(ABC):
     async def _execute(self, args: Any, ctx: UserContext) -> Any:
         """Do the work and return JSON-serialisable data, or raise ToolFailure/StoreError."""
 
+    async def describe(self, args: Any, ctx: UserContext) -> str | None:
+        """For write tools: a human-readable summary of what the action will do, built from
+        fresh store data, for the customer to confirm. Raise ToolFailure/StoreError to
+        refuse early (e.g. the target doesn't exist or the action isn't possible). Tools
+        without a description cannot be proposed."""
+        return None
+
+    def outcome_message(self, result: ToolResult) -> str:
+        """Code-written text telling the customer how a confirmed action went."""
+        if result.ok:
+            return "Done."
+        return "That didn't work, and the action may not have been completed."
+
     async def run(self, args: Any, ctx: UserContext) -> ToolResult:
+        return await self._guard(self._execute(args, ctx))
+
+    async def propose(self, args: Any, ctx: UserContext) -> ToolResult:
+        """Run `describe` with the same error handling as `run`: ok with
+        {"summary": ...}, or a failure explaining why the action can't be proposed."""
+        return await self._guard(self._summary(args, ctx))
+
+    async def _summary(self, args: Any, ctx: UserContext) -> dict[str, str]:
+        summary = await self.describe(args, ctx)
+        if summary is None:
+            raise ToolFailure("not_allowed", "This action can't be confirmed here.")
+        return {"summary": summary}
+
+    async def _guard(self, work: Awaitable[Any]) -> ToolResult:
         try:
-            return ToolResult.success(await self._execute(args, ctx))
+            return ToolResult.success(await work)
         except ToolFailure as exc:
             return ToolResult.failure(exc.code, exc.message)
         except StoreError as exc:
