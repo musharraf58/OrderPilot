@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,4 +58,44 @@ class Message(Base):
 
     __table_args__ = (
         UniqueConstraint("conversation_id", "seq", name="uq_messages_conversation_seq"),
+    )
+
+
+class PendingAction(Base):
+    """A write action the model proposed and the customer has not resolved yet.
+
+    The model can only create these (through the agent loop); only the customer, through
+    the confirm/cancel endpoints, can resolve them. Arguments are fixed at proposal time.
+    """
+
+    __tablename__ = "pending_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    tool_name: Mapped[str] = mapped_column(String(64))
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # Built by our code from fresh store data, never by the model.
+    summary: Mapped[str] = mapped_column(Text)
+    # pending | confirmed | cancelled | expired | superseded | failed
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'confirmed', 'cancelled', 'expired', 'superseded', 'failed')",
+            name="ck_pending_actions_status",
+        ),
+        # The database itself guarantees at most one pending action per conversation.
+        Index(
+            "uq_pending_actions_one_pending_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
     )

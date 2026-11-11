@@ -63,7 +63,7 @@ async def sessionmaker(database_url):
     """A clean database for each test (tables truncated, schema kept)."""
     engine = create_async_engine(database_url, poolclass=NullPool)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE conversations, messages CASCADE"))
+        await conn.execute(text("TRUNCATE conversations, messages, pending_actions CASCADE"))
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 
