@@ -93,6 +93,7 @@ def api_app(store_client, registry, clock):
     app.state.llm = None
     app.state.auth_cache = TTLCache(ttl=60, clock=clock)
     app.state.rate_limiter = RateLimiter(limit=100, window_s=600, clock=clock)
+    app.state.action_rate_limiter = RateLimiter(limit=100, window_s=600, clock=clock)
     app.state.run_locks = RunLocks(stale_after=90, clock=clock)
     return app
 
