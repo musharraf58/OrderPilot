@@ -263,3 +263,84 @@ async def test_system_prompt_says_writes_are_disabled(make_agent, ctx):
     assert "cannot cancel orders" in llm.requests[0]["system"]
     assert isinstance(llm.requests[0]["messages"][0], UserMessage)
     assert not any(isinstance(m, ToolCallMessage) for m in llm.requests[0]["messages"])
+
+
+# --- streaming ----------------------------------------------------------------
+
+
+async def collect_events(agent, ctx, question="hi", history=()):
+    return [e async for e in agent.run_stream(question, list(history), ctx)]
+
+
+def kinds(events):
+    return [e.type for e in events]
+
+
+async def test_stream_text_answer_emits_deltas_then_finished(registry, ctx):
+    agent = Agent(ScriptedLLM([text("Hello there!")], chunk_size=4), registry)
+    events = await collect_events(agent, ctx)
+    assert kinds(events) == ["text_delta"] * 3 + ["finished"]
+    assert "".join(e.text for e in events[:-1]) == "Hello there!"
+    assert events[-1].result.final_text == "Hello there!"
+
+
+async def test_stream_tool_events_in_order(registry, ctx, store):
+    store.get("/orders").respond(200, json=[order()])
+    store.get("/products").respond(503)
+    agent = Agent(
+        ScriptedLLM(
+            [
+                calls(("list_my_orders", {}), ("search_products", {"query": "mug"})),
+                text("Done.", (5, 2)),
+            ],
+            chunk_size=10,
+        ),
+        registry,
+    )
+    events = await collect_events(agent, ctx)
+    assert kinds(events) == [
+        "tool_started",
+        "tool_finished",
+        "tool_started",
+        "tool_finished",
+        "text_delta",
+        "finished",
+    ]
+    assert [(e.name, e.ok) for e in events if e.type == "tool_finished"] == [
+        ("list_my_orders", True),
+        ("search_products", False),
+    ]
+
+
+async def test_stream_refused_write_still_reports_tool_events(registry, ctx):
+    agent = Agent(
+        ScriptedLLM([calls(("cancel_order", {"order_id": str(uuid4())})), text("Can't.")]),
+        registry,
+    )
+    events = await collect_events(agent, ctx)
+    finished = [e for e in events if e.type == "tool_finished"]
+    assert [(e.name, e.ok) for e in finished] == [("cancel_order", False)]
+
+
+async def test_stream_timeout_while_waiting_for_model(registry, ctx):
+    async def slow():
+        await asyncio.sleep(5)
+        return text("too late")
+
+    agent = Agent(ScriptedLLM([slow]), registry, timeout_s=0.05)
+    events = await collect_events(agent, ctx)
+    assert kinds(events) == ["finished"]
+    assert events[-1].result.trace.reason == "timeout"
+    assert events[-1].result.final_text == TIMEOUT_MESSAGE
+
+
+async def test_stream_timeout_is_not_charged_to_a_slow_consumer(registry, ctx):
+    # The consumer pausing between events must not trigger the agent's timeout inside
+    # the consumer's own code; only the agent's awaits are bounded.
+    agent = Agent(ScriptedLLM([text("abcdef")], chunk_size=2), registry, timeout_s=0.2)
+    events = []
+    async for event in agent.run_stream("hi", [], ctx):
+        events.append(event)
+        await asyncio.sleep(0.15)
+    assert events[-1].result.trace.outcome in {"completed", "truncated"}
+    assert kinds(events)[-1] == "finished"

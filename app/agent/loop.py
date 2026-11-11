@@ -3,8 +3,8 @@
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -12,6 +12,7 @@ from app.agent.llm import (
     AssistantMessage,
     LLMClient,
     LLMError,
+    LLMResponse,
     Message,
     ToolCall,
     ToolCallMessage,
@@ -40,6 +41,32 @@ class AgentResult(BaseModel):
     usage: Usage
     # The conversation to pass as `history` on the customer's next turn.
     history: list[Message]
+
+
+class TextDelta(BaseModel):
+    type: Literal["text_delta"] = "text_delta"
+    text: str
+
+
+class ToolStarted(BaseModel):
+    type: Literal["tool_started"] = "tool_started"
+    name: str
+    call_id: str
+
+
+class ToolFinished(BaseModel):
+    type: Literal["tool_finished"] = "tool_finished"
+    name: str
+    call_id: str
+    ok: bool
+
+
+class Finished(BaseModel):
+    type: Literal["finished"] = "finished"
+    result: AgentResult
+
+
+AgentEvent = TextDelta | ToolStarted | ToolFinished | Finished
 
 
 def _ms_since(start: float) -> float:
@@ -74,16 +101,76 @@ class Agent:
     async def run(
         self, user_message: str, history: Sequence[Message], ctx: UserContext
     ) -> AgentResult:
+        """Run one customer turn to completion (the non-streaming view of run_stream)."""
+        async for event in self.run_stream(user_message, history, ctx):
+            if isinstance(event, Finished):
+                return event.result
+        raise RuntimeError("run_stream ended without a Finished event")  # pragma: no cover
+
+    async def run_stream(
+        self, user_message: str, history: Sequence[Message], ctx: UserContext
+    ) -> AsyncIterator[AgentEvent]:
+        """Run one customer turn, yielding progress events and finally Finished(result).
+
+        Every await is bounded by one shared deadline (asyncio.timeout_at around each
+        individual await, never around a yield: a timeout that spans a yield would fire
+        while the consumer is busy and cancel the consumer's code instead of ours).
+        """
         messages: list[Message] = [*history, UserMessage(text=user_message)]
         trace = Trace()
         start = time.perf_counter()
-        timeout = asyncio.timeout(self.timeout_s)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_s
+        tools = self.offered_tools()
         final_text: str | None = None
+
         try:
-            async with timeout:
-                final_text = await self._loop(messages, trace, ctx)
+            for _ in range(self.max_steps):
+                started = time.perf_counter()
+                response: LLMResponse | None = None
+                stream = self.llm.generate_stream(self.system_prompt, messages, tools)
+                try:
+                    while True:
+                        async with asyncio.timeout_at(deadline):
+                            item = await anext(stream, None)
+                        if item is None:
+                            break
+                        if isinstance(item, LLMResponse):
+                            response = item
+                        else:
+                            yield TextDelta(text=item)
+                finally:
+                    await stream.aclose()
+                if response is None:
+                    raise LLMError("model stream ended without a response")
+
+                trace.usage = trace.usage + response.usage
+                trace.steps.append(
+                    ModelCallStep(
+                        latency_ms=_ms_since(started),
+                        usage=response.usage,
+                        response="tool_calls" if response.tool_calls else "text",
+                        tool_calls=[c.name for c in response.tool_calls],
+                    )
+                )
+                if not response.tool_calls:
+                    final_text = response.text or ""
+                    break
+
+                messages.append(ToolCallMessage(calls=response.tool_calls))
+                # Sequential on purpose: deterministic order, and no bursts on the store.
+                for call in response.tool_calls:
+                    yield ToolStarted(name=call.name, call_id=call.id)
+                    async with asyncio.timeout_at(deadline):
+                        result = await self._execute(call, trace, ctx)
+                    yield ToolFinished(name=call.name, call_id=call.id, ok=result.ok)
+                    messages.append(
+                        ToolResultMessage(
+                            call_id=call.id, name=call.name, result=result.model_dump(mode="json")
+                        )
+                    )
         except TimeoutError:
-            if not timeout.expired():
+            if loop.time() < deadline:
                 raise
             trace.outcome, trace.reason = "truncated", "timeout"
         except LLMError as exc:
@@ -109,35 +196,11 @@ class Agent:
             ]
 
         trace.total_latency_ms = _ms_since(start)
-        return AgentResult(final_text=final_text, trace=trace, usage=trace.usage, history=messages)
-
-    async def _loop(self, messages: list[Message], trace: Trace, ctx: UserContext) -> str | None:
-        tools = self.offered_tools()
-        for _ in range(self.max_steps):
-            started = time.perf_counter()
-            response = await self.llm.generate(self.system_prompt, messages, tools)
-            trace.usage = trace.usage + response.usage
-            trace.steps.append(
-                ModelCallStep(
-                    latency_ms=_ms_since(started),
-                    usage=response.usage,
-                    response="tool_calls" if response.tool_calls else "text",
-                    tool_calls=[c.name for c in response.tool_calls],
-                )
+        yield Finished(
+            result=AgentResult(
+                final_text=final_text, trace=trace, usage=trace.usage, history=messages
             )
-            if not response.tool_calls:
-                return response.text or ""
-
-            messages.append(ToolCallMessage(calls=response.tool_calls))
-            # Sequential on purpose: deterministic order, and no bursts on the store.
-            for call in response.tool_calls:
-                result = await self._execute(call, trace, ctx)
-                messages.append(
-                    ToolResultMessage(
-                        call_id=call.id, name=call.name, result=result.model_dump(mode="json")
-                    )
-                )
-        return None
+        )
 
     async def _execute(self, call: ToolCall, trace: Trace, ctx: UserContext) -> ToolResult:
         started = time.perf_counter()
