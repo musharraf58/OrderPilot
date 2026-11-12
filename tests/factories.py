@@ -47,3 +47,35 @@ def me(**overrides) -> dict:
         "created_at": "2026-01-01T00:00:00Z",
     }
     return data | overrides
+
+
+DOCUMIND_URL = "https://documind.test"
+POLICY_COLLECTION = "orderpilot-policies"
+
+
+def collection(**overrides) -> dict:
+    data = {
+        "id": str(uuid4()),
+        "name": POLICY_COLLECTION,
+        "description": None,
+        "created_at": "2026-11-01T00:00:00Z",
+    }
+    return data | overrides
+
+
+def search_result(**overrides) -> dict:
+    data = {
+        "chunk_id": str(uuid4()),
+        "document_id": str(uuid4()),
+        "document_name": "returns-and-refunds.md",
+        "content": "Returns are handled by our support team.",
+        "page_number": None,
+        "section_title": "How to start a return",
+        "distance": 0.25,
+        "vector_rank": 1,
+        "keyword_rank": None,
+        "keyword_score": None,
+        "keyword_all_terms": None,
+        "rrf_score": 0.016,
+    }
+    return data | overrides

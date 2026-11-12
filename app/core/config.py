@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: SecretStr = SecretStr("")
     GEMINI_MODEL: str = "gemini-3.5-flash-lite"
     STORE_API_URL: str = "http://localhost:8001"
+
+    # DocuMind (policy retrieval). One service account; empty URL = knowledge tool disabled.
+    DOCUMIND_API_URL: str = ""
+    DOCUMIND_EMAIL: str = ""
+    DOCUMIND_PASSWORD: SecretStr = SecretStr("")
+    DOCUMIND_COLLECTION: str = "orderpilot-policies"
+    POLICY_MIN_RELEVANCE: float = 0.5  # 1 - cosine distance; lower results are dropped
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
 
