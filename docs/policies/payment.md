@@ -1,6 +1,4 @@
-# Payment Policy
-
-*Hearth & Desk Co. is a fictional store used to demo OrderPilot. This is not a real company's policy.*
+# Payment Policy (Hearth & Desk Co., a fictional demo store)
 
 ## Accepted payment methods
 

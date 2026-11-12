@@ -1,6 +1,4 @@
-# Shipping Policy
-
-*Hearth & Desk Co. is a fictional store used to demo OrderPilot. This is not a real company's policy.*
+# Shipping Policy (Hearth & Desk Co., a fictional demo store)
 
 ## Where we ship
 

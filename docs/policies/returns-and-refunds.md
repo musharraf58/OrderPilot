@@ -1,6 +1,4 @@
-# Returns and Refunds Policy
-
-*Hearth & Desk Co. is a fictional store used to demo OrderPilot. This is not a real company's policy.*
+# Returns and Refunds Policy (Hearth & Desk Co., a fictional demo store)
 
 ## Return window
 

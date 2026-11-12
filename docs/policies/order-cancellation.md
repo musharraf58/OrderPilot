@@ -1,6 +1,4 @@
-# Order Cancellation Policy
-
-*Hearth & Desk Co. is a fictional store used to demo OrderPilot. This is not a real company's policy.*
+# Order Cancellation Policy (Hearth & Desk Co., a fictional demo store)
 
 ## Which orders can be cancelled
 
