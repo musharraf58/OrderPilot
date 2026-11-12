@@ -193,6 +193,8 @@ async def main(show_trace: bool) -> int:
             print(f"\norderpilot> {result.final_text}")
             if show_trace:
                 print_trace(result.trace)
+        if documind is not None:
+            await documind.aclose()
     return 0
 
 
