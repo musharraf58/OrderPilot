@@ -2,7 +2,7 @@
 
 Not part of the test suite and never run in CI (it needs real credentials and uses the
 free-tier Gemini quota). Reads STORE_API_URL, STORE_EMAIL/STORE_PASSWORD (or STORE_TOKEN),
-GEMINI_API_KEY and optionally GEMINI_MODEL from .env.
+GEMINI_API_KEY and optionally GEMINI_MODEL from .env (and DOCUMIND_* for policy answers).
 
     uv run python scripts/chat.py            # type 'exit' or Ctrl-D to quit
     uv run python scripts/chat.py --trace    # also print every step after each answer
@@ -27,6 +27,7 @@ from _env import load_env, store_token
 from app.agent.llm import Message
 from app.agent.loop import Agent
 from app.agent.trace import ModelCallStep, Trace
+from app.clients.documind import DocuMindClient
 from app.clients.store import StoreClient, StoreError
 from app.core.config import get_settings
 from app.tools.context import UserContext
@@ -167,7 +168,19 @@ async def main(show_trace: bool) -> int:
             print(f"Could not sign in to the store: {exc.message}")
             return 1
 
-        agent = Agent(GeminiClient(env["GEMINI_API_KEY"], model), build_default_registry(store))
+        settings = get_settings()
+        documind = None
+        if settings.DOCUMIND_API_URL:
+            documind = DocuMindClient(
+                settings.DOCUMIND_API_URL,
+                settings.DOCUMIND_EMAIL,
+                settings.DOCUMIND_PASSWORD,
+                collection_name=settings.DOCUMIND_COLLECTION,
+            )
+        registry = build_default_registry(
+            store, documind, policy_min_relevance=settings.POLICY_MIN_RELEVANCE
+        )
+        agent = Agent(GeminiClient(env["GEMINI_API_KEY"], model), registry)
         print(
             f"OrderPilot ({model}). Signed in as customer {ctx.customer_id}. Type 'exit' to quit."
         )
