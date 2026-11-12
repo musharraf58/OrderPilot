@@ -113,7 +113,9 @@ class Agent:
         self.max_steps = max_steps
         self.timeout_s = timeout_s
         self.allow_writes = allow_writes
-        self.system_prompt = build_system_prompt(allow_writes=allow_writes)
+        self.system_prompt = build_system_prompt(
+            allow_writes=allow_writes, policies=registry.get("search_policies") is not None
+        )
 
     def _is_offered(self, name: str) -> bool:
         tool = self.registry.get(name)
