@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from app.clients.documind import DocuMindClient
 from app.clients.store import StoreClient
 from app.tools.base import Tool, ToolResult
 from app.tools.context import UserContext
@@ -78,11 +79,20 @@ class ToolRegistry:
             return ToolResult.failure("internal_error", "The tool failed unexpectedly.")
 
 
-def build_default_registry(client: StoreClient) -> ToolRegistry:
+def build_default_registry(
+    client: StoreClient,
+    documind: DocuMindClient | None = None,
+    *,
+    policy_min_relevance: float = 0.4,
+) -> ToolRegistry:
+    """All tools. search_policies is only registered when DocuMind is configured."""
     from app.tools.orders import CancelOrder, GetOrder, ListMyOrders
+    from app.tools.policies import SearchPolicies
     from app.tools.products import GetProduct, SearchProducts
 
     registry = ToolRegistry()
     for tool_cls in (SearchProducts, GetProduct, ListMyOrders, GetOrder, CancelOrder):
         registry.register(tool_cls(client))
+    if documind is not None:
+        registry.register(SearchPolicies(documind, policy_min_relevance))
     return registry

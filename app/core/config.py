@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     DOCUMIND_EMAIL: str = ""
     DOCUMIND_PASSWORD: SecretStr = SecretStr("")
     DOCUMIND_COLLECTION: str = "orderpilot-policies"
-    POLICY_MIN_RELEVANCE: float = 0.5  # 1 - cosine distance; lower results are dropped
+    # 1 - cosine distance. Calibrated on real searches: relevant full questions scored
+    # 0.46-0.58, unrelated questions at most 0.39. The prompt stays the final judge.
+    POLICY_MIN_RELEVANCE: float = 0.40
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
 

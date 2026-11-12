@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.clients.documind import DocuMindClient
 from app.clients.store import StoreClient
 from app.core.limits import RateLimiter, RunLocks
 from app.core.ttl_cache import TTLCache
@@ -15,9 +16,16 @@ from app.main import create_app
 from app.tools.context import UserContext
 from app.tools.registry import build_default_registry
 from tests.database import migrate_test_database
-from tests.factories import BASE_URL, CUSTOMER_ID
+from tests.factories import (
+    BASE_URL,
+    CUSTOMER_ID,
+    DOCUMIND_URL,
+    POLICY_COLLECTION,
+    collection,
+)
 
 TOKEN = "customer-token"
+POLICY_COLLECTION_ROW = collection()
 
 
 @pytest.fixture
@@ -33,8 +41,40 @@ async def store_client(store):
 
 
 @pytest.fixture
-def registry(store_client):
-    return build_default_registry(store_client)
+def documind():
+    """Mocked DocuMind: login and the policy collection lookup always work.
+
+    Tests add a search route with documind_search(...)."""
+    with respx.mock(base_url=DOCUMIND_URL, assert_all_called=False) as mock:
+        mock.post("/auth/login").respond(200, json={"access_token": "dm-token"})
+        mock.get("/collections").respond(200, json=[POLICY_COLLECTION_ROW])
+        yield mock
+
+
+@pytest.fixture
+def documind_search(documind):
+    def _respond(*results, status=200):
+        route = documind.post(f"/collections/{POLICY_COLLECTION_ROW['id']}/search")
+        return route.respond(status, json=list(results)) if status == 200 else route.respond(status)
+
+    return _respond
+
+
+@pytest.fixture
+async def documind_client(documind):
+    async with DocuMindClient(
+        DOCUMIND_URL,
+        "svc@example.com",
+        SecretStr("pw"),
+        collection_name=POLICY_COLLECTION,
+        sleep=AsyncMock(),
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+def registry(store_client, documind_client):
+    return build_default_registry(store_client, documind_client, policy_min_relevance=0.4)
 
 
 @pytest.fixture

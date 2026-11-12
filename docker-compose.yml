@@ -25,6 +25,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://orderpilot:orderpilot@db:5432/orderpilot
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      DOCUMIND_API_URL: ${DOCUMIND_API_URL:-}
+      DOCUMIND_EMAIL: ${DOCUMIND_EMAIL:-}
+      DOCUMIND_PASSWORD: ${DOCUMIND_PASSWORD:-}
+      DOCUMIND_COLLECTION: ${DOCUMIND_COLLECTION:-orderpilot-policies}
       STORE_API_URL: ${STORE_API_URL:-http://host.docker.internal:8001}
       ENVIRONMENT: development
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

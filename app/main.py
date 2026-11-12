@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api import actions, auth, conversations, health
+from app.clients.documind import DocuMindClient
 from app.clients.store import StoreClient
 from app.core.config import get_settings
 from app.core.limits import RateLimiter, RunLocks
@@ -27,8 +28,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from app.agent.gemini import GeminiClient
         llm = GeminiClient(settings.GEMINI_API_KEY.get_secret_value(), settings.GEMINI_MODEL)
 
+    documind = None
+    if settings.DOCUMIND_API_URL:
+        documind = DocuMindClient(
+            settings.DOCUMIND_API_URL,
+            settings.DOCUMIND_EMAIL,
+            settings.DOCUMIND_PASSWORD,
+            collection_name=settings.DOCUMIND_COLLECTION,
+        )
+
     app.state.store = store
-    app.state.registry = build_default_registry(store)
+    app.state.registry = build_default_registry(
+        store, documind, policy_min_relevance=settings.POLICY_MIN_RELEVANCE
+    )
     app.state.llm = llm
     app.state.sessionmaker = get_sessionmaker()
     app.state.auth_cache = TTLCache(ttl=settings.AUTH_CACHE_TTL_S)
@@ -41,6 +53,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await store.aclose()
+        if documind is not None:
+            await documind.aclose()
         await get_engine().dispose()
 
 

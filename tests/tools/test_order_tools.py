@@ -214,6 +214,7 @@ def test_default_registry_kinds(registry):
         "list_my_orders": "read",
         "get_order": "read",
         "cancel_order": "write",
+        "search_policies": "read",
     }
 
 

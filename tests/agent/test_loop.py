@@ -152,7 +152,13 @@ async def test_write_tool_not_offered_and_refused_when_writes_disabled(make_agen
     result = await agent.run("cancel my order", [], ctx)
 
     offered = {t["name"] for t in llm.requests[0]["tools"]}
-    assert offered == {"search_products", "get_product", "list_my_orders", "get_order"}
+    assert offered == {
+        "search_products",
+        "get_product",
+        "list_my_orders",
+        "get_order",
+        "search_policies",
+    }
     step = result.trace.tool_calls()[0]
     assert step.refused is True
     assert step.result.error.code == "not_allowed"
